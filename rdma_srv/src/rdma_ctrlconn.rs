@@ -16,6 +16,7 @@ use spin::Mutex;
 use std::iter::FromIterator;
 use std::net::{IpAddr, Ipv4Addr};
 use std::{collections::HashMap, str::FromStr};
+use super::common::*;
 
 use super::qlib::rdma_share::*;
 
@@ -39,34 +40,43 @@ pub struct CtrlInfo {
 
     //Pod Ip to Node Ip
     pub podIpInfo: Mutex<HashMap<u32, u32>>,
+
+    // Hashmap for file descriptors so that different handling can be dispatched.
+    pub fds: Mutex<HashMap<i32, Srv_FdType>>,
+
+    // Hostname of the node
+    pub hostname: Mutex<String>,
+
+    // Timestamp of the node
+    pub timestamp: Mutex<u32>,
 }
 
 impl Default for CtrlInfo {
     fn default() -> CtrlInfo {
         let mut nodes: HashMap<u32, Node> = HashMap::new();
-        let subnet = u32::from(Ipv4Addr::from_str("172.16.1.0").unwrap());
-        let netmask = u32::from(Ipv4Addr::from_str("255.255.255.0").unwrap());
-        let lab1ip = u32::from(Ipv4Addr::from_str("172.16.1.8").unwrap());
-        let devip = u32::from(Ipv4Addr::from_str("172.16.1.6").unwrap());
-        nodes.insert(
-            lab1ip,
-            Node {
-                ipAddr: lab1ip,
-                timestamp: 1234,
-                subnet: subnet,
-                netmask: netmask,
-            },
-        );
+        // let subnet = u32::from(Ipv4Addr::from_str("172.16.1.0").unwrap());
+        // let netmask = u32::from(Ipv4Addr::from_str("255.255.255.0").unwrap());
+        // let lab1ip = u32::from(Ipv4Addr::from_str("172.16.1.8").unwrap());
+        // let devip = u32::from(Ipv4Addr::from_str("172.16.1.6").unwrap());
+        // nodes.insert(
+        //     lab1ip,
+        //     Node {
+        //         ipAddr: lab1ip,
+        //         timestamp: 1234,
+        //         subnet: subnet,
+        //         netmask: netmask,
+        //     },
+        // );
 
-        nodes.insert(
-            devip,
-            Node {
-                ipAddr: devip,
-                timestamp: 5678,
-                subnet: subnet,
-                netmask: netmask,
-            },
-        );
+        // nodes.insert(
+        //     devip,
+        //     Node {
+        //         ipAddr: devip,
+        //         timestamp: 5678,
+        //         subnet: subnet,
+        //         netmask: netmask,
+        //     },
+        // );
 
         CtrlInfo {
             nodes: Mutex::new(nodes),
@@ -81,9 +91,33 @@ impl Default for CtrlInfo {
             //134654144 -> 100733100
             podIpInfo: Mutex::new(HashMap::from_iter([(
                 u32::from(Ipv4Addr::from_str("192.168.6.8").unwrap()).to_be(),
-                (u32::from(Ipv4Addr::from_str("172.16.1.6").unwrap()).to_be()),
+                (u32::from(Ipv4Addr::from_str("172.16.1.29").unwrap()).to_be()),
             )])),
+            fds: Mutex::new(HashMap::new()),
+            hostname: Mutex::new(String::new()),
+            timestamp: Mutex::new(0),
         }
+    }
+}
+
+impl CtrlInfo{
+    pub fn fds_insert(&self, fd: i32, fdType: Srv_FdType){
+        let mut fds = self.fds.lock();
+        fds.insert(fd, fdType);
+    }
+
+    pub fn fds_get(&self, fd: i32) -> Srv_FdType {
+        let fds = self.fds.lock();
+        fds.get(&fd).unwrap().clone()
+    }
+
+    pub fn hostname_set(&self, value: String) {
+        let mut hostname = self.hostname.lock();
+        *hostname = value;
+    }
+
+    pub fn hostname_get(&self) -> String {
+        self.hostname.lock().clone()
     }
 }
 
@@ -103,10 +137,12 @@ pub struct ClusterSubnetInfo {
 // from current design, one node has only one subnet even it can have multiple VPC
 // for one node, different VPC has to use one subnet,
 // todo: support different subnet for different VPC
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Node {
     pub ipAddr: u32,
     pub timestamp: u64,
+    pub hostname: String,
+    pub resource_version: i32,
 
     // node subnet/mask
     pub subnet: u32,

@@ -79,6 +79,10 @@ pub mod rdma_def;
 pub mod rdma_srv;
 pub mod unix_socket_def;
 
+pub mod common;
+pub mod constants;
+pub mod node_informer;
+
 use crate::qlib::bytestream::ByteStream;
 use crate::rdma_srv::RDMA_CTLINFO;
 use crate::rdma_srv::RDMA_SRV;
@@ -109,6 +113,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::{env, mem, ptr, thread, time};
+use node_informer::NodeInformer;
+use common::*;
 
 #[allow(unused_macros)]
 macro_rules! syscall {
@@ -139,15 +145,6 @@ const WRITE_FLAGS: i32 = libc::EPOLLET | libc::EPOLLOUT;
 //const WRITE_FLAGS: i32 = libc::EPOLLONESHOT | libc::EPOLLIN | libc::EPOLLOUT;
 
 const READ_WRITE_FLAGS: i32 = libc::EPOLLET | libc::EPOLLOUT | libc::EPOLLIN;
-
-pub enum FdType {
-    UnixDomainSocketServer(UnixSocket),
-    UnixDomainSocketConnect(UnixSocket),
-    TCPSocketServer,
-    TCPSocketConnect(u32),
-    RDMACompletionChannel,
-    SrvEventFd(i32),
-}
 
 // fn main() {
 fn main_test() {
@@ -449,9 +446,14 @@ fn test() {
 }
 
 // fn main_backup() -> io::Result<()> {
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RDMA Service is starting!");
     RDMA.Init("", 1);
+
+    let mut node_informer = NodeInformer::new().await?;
+    node_informer.run();
+
     // let test = RDMA_SRV1.eventfd;
     // println!("test: {}", test);
     // let test1 = RDMA_SRV.eventfd;
@@ -510,8 +512,12 @@ fn main() -> io::Result<()> {
     //     );
     // }
 
-    // hashmap for file descriptors so that different handling can be dispatched.
-    let mut fds: HashMap<i32, FdType> = HashMap::new();
+    let hostname_os = hostname::get()?;
+    match hostname_os.into_string() {
+        Ok(v) => RDMA_CTLINFO.hostname_set(v),
+        Err(_) => println!("Failed to retrieve hostname."),
+    }
+    println!("Hostname is {}", RDMA_CTLINFO.hostname_get());
 
     let epoll_fd = epoll_create().expect("can create epoll queue");
     let mut events: Vec<EpollEvent> = Vec::with_capacity(1024);
@@ -520,13 +526,13 @@ fn main() -> io::Result<()> {
     let server_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
     println!("server_fd is {}", server_fd);
     unblock_fd(server_fd);
-    fds.insert(server_fd, FdType::TCPSocketServer);
+    RDMA_CTLINFO.fds_insert(server_fd, Srv_FdType::TCPSocketServer);
     epoll_add(epoll_fd, server_fd, read_write_event(server_fd as u64))?;
 
     //watch RDMA event
     let ccFd = RDMA.CompleteChannelFd();
     println!("RDMA CCFd: {}", ccFd);
-    fds.insert(ccFd, FdType::RDMACompletionChannel);
+    RDMA_CTLINFO.fds_insert(ccFd, Srv_FdType::RDMACompletionChannel);
     //let ret1 = unsafe { rdmaffi::ibv_req_notify_cq(RDMA.CompleteQueue(), 0) };
     //println!("ret1: {}", ret1);
 
@@ -593,10 +599,7 @@ fn main() -> io::Result<()> {
     }
     let srv_unix_sock = UnixSocket::NewServer(unix_sock_path).unwrap();
     let srv_unix_sock_fd = srv_unix_sock.as_raw_fd();
-    fds.insert(
-        srv_unix_sock_fd,
-        FdType::UnixDomainSocketServer(srv_unix_sock),
-    );
+    RDMA_CTLINFO.fds_insert(srv_unix_sock_fd, Srv_FdType::UnixDomainSocketServer(srv_unix_sock));
 
     println!("srv_unix_sock: {}", srv_unix_sock_fd);
     unblock_fd(srv_unix_sock_fd);
@@ -633,15 +636,17 @@ fn main() -> io::Result<()> {
         //TODO: this is hardcoded for testing purpose, should come from control plane.
         let node = Node {
             //ipAddr: u32::from(Ipv4Addr::from_str("6.1.16.172").unwrap()),
-            ipAddr: u32::from(Ipv4Addr::from_str("172.16.1.6").unwrap()).to_be(),
+            ipAddr: u32::from(Ipv4Addr::from_str("172.16.1.29").unwrap()).to_be(),
             timestamp: 0,
             subnet: u32::from(Ipv4Addr::from_str("172.16.1.0").unwrap()),
             netmask: u32::from(Ipv4Addr::from_str("255.255.255.0").unwrap()),
+            hostname: String::default(),
+            resource_version: 0,
         };
         let sock_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
         println!("sock_fd is {}", sock_fd);
         unblock_fd(sock_fd);
-        fds.insert(sock_fd, FdType::TCPSocketConnect(node.ipAddr));
+        RDMA_CTLINFO.fds_insert(sock_fd, Srv_FdType::TCPSocketConnect(node.ipAddr));
         epoll_add(epoll_fd, sock_fd, read_write_event(sock_fd as u64))?;
 
         println!("new conn");
@@ -726,7 +731,7 @@ fn main() -> io::Result<()> {
     let srvEventFd = RDMA_SRV.eventfd;
     epoll_add(epoll_fd, srvEventFd, read_event(srvEventFd as u64))?;
     unblock_fd(srvEventFd);
-    fds.insert(srvEventFd, FdType::SrvEventFd(srvEventFd));
+    RDMA_CTLINFO.fds_insert(srvEventFd, Srv_FdType::SrvEventFd(srvEventFd));
 
     loop {
         events.clear();
@@ -748,9 +753,9 @@ fn main() -> io::Result<()> {
 
         for ev in &events {
             // print!("u64: {}, events: {:x}", ev.U64, ev.Events);
-            let event_data = fds.get(&(ev.U64 as i32));
+            let event_data = RDMA_CTLINFO.fds_get(ev.U64 as i32);
             match event_data {
-                Some(FdType::TCPSocketServer) => {
+                Srv_FdType::TCPSocketServer => {
                     let stream_fd;
                     let mut cliaddr: libc::sockaddr_in = unsafe { mem::zeroed() };
                     let mut len = mem::size_of_val(&cliaddr) as u32;
@@ -765,7 +770,7 @@ fn main() -> io::Result<()> {
                     println!("stream_fd is: {}", stream_fd);
 
                     let peerIpAddrU32 = cliaddr.sin_addr.s_addr;
-                    fds.insert(stream_fd, FdType::TCPSocketConnect(peerIpAddrU32));
+                    RDMA_CTLINFO.fds_insert(stream_fd, Srv_FdType::TCPSocketConnect(peerIpAddrU32));
                     let controlRegionId =
                         RDMA_SRV.controlBufIdMgr.lock().AllocId().unwrap() as usize; // TODO: should handle no space issue.
                     let sockBuf = Arc::new(SocketBuff::InitWithShareMemory(
@@ -828,7 +833,7 @@ fn main() -> io::Result<()> {
                     epoll_add(epoll_fd, stream_fd, read_write_event(stream_fd as u64))?;
                     println!("add stream fd");
                 }
-                Some(FdType::TCPSocketConnect(ipAddr)) => match RDMA_SRV.conns.lock().get(ipAddr) {
+                Srv_FdType::TCPSocketConnect(ipAddr) => match RDMA_SRV.conns.lock().get(&ipAddr) {
                     Some(rdmaConn) => {
                         rdmaConn.Notify(ev.Events as u64);
                     }
@@ -836,15 +841,15 @@ fn main() -> io::Result<()> {
                         panic!("no RDMA connection for {} found!", ipAddr)
                     }
                 },
-                Some(FdType::UnixDomainSocketServer(_srv_sock)) => {
+                Srv_FdType::UnixDomainSocketServer(_srv_sock) => {
                     let conn_sock = UnixSocket::Accept(ev.U64 as i32).unwrap();
                     let conn_sock_fd = conn_sock.as_raw_fd();
                     unblock_fd(conn_sock_fd);
-                    fds.insert(conn_sock_fd, FdType::UnixDomainSocketConnect(conn_sock));
+                    RDMA_CTLINFO.fds_insert(conn_sock_fd, Srv_FdType::UnixDomainSocketConnect(conn_sock));
                     epoll_add(epoll_fd, conn_sock_fd, read_event(conn_sock_fd as u64))?;
                     println!("add unix sock fd: {}", conn_sock_fd);
                 }
-                Some(FdType::UnixDomainSocketConnect(conn_sock)) => {
+                Srv_FdType::UnixDomainSocketConnect(conn_sock) => {
                     println!("UnixDomainSocketConnect");
                     loop {
                         let mut body = 0;
@@ -859,7 +864,7 @@ fn main() -> io::Result<()> {
                                 if body == 1 {
                                     // init
                                     println!("init!!");
-                                    InitContainer(conn_sock);
+                                    InitContainer(&conn_sock);
                                 } else if body == 2 {
                                     // terminate
                                     println!("terminate!!");
@@ -872,18 +877,18 @@ fn main() -> io::Result<()> {
                         }
                     }
                 }
-                Some(FdType::RDMACompletionChannel) => {
+                Srv_FdType::RDMACompletionChannel => {
                     // println!("Got RDMA completion event");
                     let _cnt = RDMA.PollCompletionQueueAndProcess();
                     RDMA.HandleCQEvent().unwrap();
-                    // println!("FdType::RDMACompletionChannel, processed {} wcs", cnt);
+                    // println!("Srv_FdType::RDMACompletionChannel, processed {} wcs", cnt);
                 }
-                Some(FdType::SrvEventFd(srvEventFd)) => {
+                Srv_FdType::SrvEventFd(srvEventFd) => {
                     // print!("u64: {}, events: {:x}", ev.U64, ev.Events);
                     // println!("srvEvent notified ****************1");
                     let ret = unsafe {
                         libc::read(
-                            *srvEventFd,
+                            srvEventFd,
                             &mut eventdata as *mut _ as *mut libc::c_void,
                             8,
                         )
@@ -897,15 +902,12 @@ fn main() -> io::Result<()> {
                     if ret < 0 && errno::errno().0 != SysErr::EAGAIN {
                         panic!(
                             "Service Wakeup fail... eventfd is {}, errno is {}",
-                            *srvEventFd,
+                            srvEventFd,
                             errno::errno().0
                         );
                     }
                     // println!("eventdata: {}", eventdata);
                     RDMA_SRV.HandleClientRequest();
-                }
-                None => {
-                    // panic!("unexpected fd {} found", ev.U64);
                 }
             }
 
@@ -943,83 +945,4 @@ fn InitContainer(conn_sock: &UnixSocket) {
             ],
         )
         .unwrap();
-}
-
-fn get_local_ip() -> u32 {
-    let _my_local_ip = local_ip().unwrap();
-
-    // println!("This is my local IP address: {:?}", my_local_ip);
-
-    let network_interfaces = list_afinet_netifas().unwrap();
-
-    for (_name, _ip) in network_interfaces.iter() {
-        //println!("{}:\t{:?}", name, ip);
-    }
-
-    return u32::from(Ipv4Addr::from_str("172.16.1.6").unwrap());
-}
-
-fn epoll_create() -> io::Result<RawFd> {
-    let fd = syscall!(epoll_create1(0))?;
-    if let Ok(flags) = syscall!(fcntl(fd, libc::F_GETFD)) {
-        let _ = syscall!(fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC));
-    }
-
-    Ok(fd)
-}
-
-fn read_event(key: u64) -> libc::epoll_event {
-    libc::epoll_event {
-        events: READ_FLAGS as u32,
-        u64: key,
-    }
-}
-
-fn write_event(key: u64) -> libc::epoll_event {
-    libc::epoll_event {
-        events: WRITE_FLAGS as u32,
-        u64: key,
-    }
-}
-
-fn read_write_event(key: u64) -> libc::epoll_event {
-    libc::epoll_event {
-        events: READ_WRITE_FLAGS as u32,
-        u64: key,
-    }
-}
-
-fn close(fd: RawFd) {
-    let _ = syscall!(close(fd));
-}
-
-fn epoll_add(epoll_fd: RawFd, fd: RawFd, mut event: libc::epoll_event) -> io::Result<()> {
-    syscall!(epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event))?;
-    Ok(())
-}
-
-fn epoll_modify(epoll_fd: RawFd, fd: RawFd, mut event: libc::epoll_event) -> io::Result<()> {
-    syscall!(epoll_ctl(epoll_fd, libc::EPOLL_CTL_MOD, fd, &mut event))?;
-    Ok(())
-}
-
-fn epoll_delete(epoll_fd: RawFd, fd: RawFd) -> io::Result<()> {
-    syscall!(epoll_ctl(
-        epoll_fd,
-        libc::EPOLL_CTL_DEL,
-        fd,
-        std::ptr::null_mut()
-    ))?;
-    Ok(())
-}
-
-fn unblock_fd(fd: i32) {
-    unsafe {
-        let flags = libc::fcntl(fd, Cmd::F_GETFL, 0);
-        let ret = libc::fcntl(fd, Cmd::F_SETFL, flags | Flags::O_NONBLOCK);
-        if ret != 0 {
-            println!("fd: {}, last error: {}", fd, Error::last_os_error());
-        }
-        assert!(ret == 0, "UnblockFd fail");
-    }
 }
