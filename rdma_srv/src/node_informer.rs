@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::common::*;
 use super::constants::*;
 use crate::rdma_ctrlconn::*;
 use crate::RDMA_CTLINFO;
@@ -83,6 +84,8 @@ impl NodeInformer {
     fn handle(&mut self, node_message: &NodeMessage) {
         let ip = node_message.ip;
         let mut nodes_map = RDMA_CTLINFO.nodes.lock();
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        let epoll_fd = RDMA_CTLINFO.epoll_fd_get();
         if node_message.event_type == EVENT_TYPE_SET {
             let node = Node {
                 hostname: node_message.hostname.clone(),
@@ -96,10 +99,30 @@ impl NodeInformer {
             if node_message.resource_version > self.max_resource_version {
                 self.max_resource_version = node_message.resource_version;
             }
+            RDMA_CTLINFO.fds_insert(fd, Srv_FdType::NodeEventFd(NodeEvent{
+                is_delete: false,
+                ip: ip,
+            }));
+            match epoll_add(epoll_fd, fd, read_write_event(fd as u64)) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("epoll_add error for node: {:?}", e);
+                }
+            }            
         } else if node_message.event_type == EVENT_TYPE_DELETE {
             if nodes_map.contains_key(&ip) {
                 if nodes_map[&ip].resource_version < node_message.resource_version {
                     nodes_map.remove(&ip);
+                    RDMA_CTLINFO.fds_insert(fd, Srv_FdType::NodeEventFd(NodeEvent{
+                        is_delete: true,
+                        ip: ip,
+                    }));
+                    match epoll_add(epoll_fd, fd, read_write_event(fd as u64)) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("epoll_add error for node: {:?}", e);
+                        }
+                    }
                 }
             }
         }

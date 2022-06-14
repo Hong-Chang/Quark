@@ -249,11 +249,10 @@ impl RDMAAgent {
                 );
             }
             RDMAReqMsg::RDMAConnect(msg) => {
-                //TODOCtrlPlane: need get nodeIp from dstIpAddr
-                match RDMA_CTLINFO.podIpInfo.lock().get(&msg.dstIpAddr) {
+                match RDMA_CTLINFO.get_node_ip_by_pod_ip(&msg.dstIpAddr) {
                     Some(nodeIpAddr) => {
                         let conns = RDMA_SRV.conns.lock();
-                        let rdmaConn = conns.get(nodeIpAddr).unwrap();
+                        let rdmaConn = conns.get(&nodeIpAddr).unwrap();
                         let rdmaChannel =
                             self.CreateClientRDMAChannel(&msg, rdmaConn.clone(), shareRegion);
                         RDMA_SRV
@@ -269,7 +268,7 @@ impl RDMAAgent {
                             // .expect("fail to send msg");
                     }
                     None => {
-                        println!("TODO: return error as no ip mapping is found");
+                        println!("TODO: return error as no ip to node mapping is found");
                     }
                 }
             }

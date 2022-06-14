@@ -635,9 +635,14 @@ pub enum Srv_FdType {
     TCPSocketConnect(u32),
     RDMACompletionChannel,
     SrvEventFd(i32),
+    NodeEventFd(NodeEvent),
 }
 
-//impl Srv_FdType
+#[derive(Clone)]
+pub struct NodeEvent{
+    pub is_delete: bool,
+    pub ip: u32,
+}
 
 pub fn get_local_ip() -> u32 {
     let _my_local_ip = local_ip().unwrap();

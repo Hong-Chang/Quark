@@ -520,6 +520,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hostname is {}", RDMA_CTLINFO.hostname_get());
 
     let epoll_fd = epoll_create().expect("can create epoll queue");
+    RDMA_CTLINFO.epoll_fd_set(epoll_fd);
     let mut events: Vec<EpollEvent> = Vec::with_capacity(1024);
 
     let args: Vec<_> = env::args().collect();
@@ -634,96 +635,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     if cur_timestamp < node.timestamp {
     if args.len() > 1 {
         //TODO: this is hardcoded for testing purpose, should come from control plane.
-        let node = Node {
-            //ipAddr: u32::from(Ipv4Addr::from_str("6.1.16.172").unwrap()),
-            ipAddr: u32::from(Ipv4Addr::from_str("172.16.1.29").unwrap()).to_be(),
-            timestamp: 0,
-            subnet: u32::from(Ipv4Addr::from_str("172.16.1.0").unwrap()),
-            netmask: u32::from(Ipv4Addr::from_str("255.255.255.0").unwrap()),
-            hostname: String::default(),
-            resource_version: 0,
-        };
-        let sock_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-        println!("sock_fd is {}", sock_fd);
-        unblock_fd(sock_fd);
-        RDMA_CTLINFO.fds_insert(sock_fd, Srv_FdType::TCPSocketConnect(node.ipAddr));
-        epoll_add(epoll_fd, sock_fd, read_write_event(sock_fd as u64))?;
 
-        println!("new conn");
-        let controlRegionId = RDMA_SRV.controlBufIdMgr.lock().AllocId().unwrap() as usize; // TODO: should handle no space issue.
-        let sockBuf = Arc::new(SocketBuff::InitWithShareMemory(
-            MemoryDef::DEFAULT_BUF_PAGE_COUNT,
-            &RDMA_SRV.controlRegion.ioMetas[controlRegionId].readBufAtoms as *const _ as u64,
-            &RDMA_SRV.controlRegion.ioMetas[controlRegionId].writeBufAtoms as *const _ as u64,
-            &RDMA_SRV.controlRegion.ioMetas[controlRegionId].consumeReadData as *const _ as u64,
-            &RDMA_SRV.controlRegion.iobufs[controlRegionId].read as *const _ as u64,
-            &RDMA_SRV.controlRegion.iobufs[controlRegionId].write as *const _ as u64,
-        ));
-
-        let rdmaConn = RDMAConn::New(
-            sock_fd,
-            sockBuf.clone(),
-            RDMA_SRV.keys[controlRegionId / 16][1],
-        );
-        let rdmaChannel = RDMAChannel::New(
-            0,
-            RDMA_SRV.keys[controlRegionId / 16][0],
-            RDMA_SRV.keys[controlRegionId / 16][1],
-            sockBuf.clone(),
-            rdmaConn.clone(),
-        );
-
-        let rdmaControlChannel = RDMAControlChannel::New((*rdmaChannel.clone()).clone());
-
-        match rdmaConn.ctrlChan.lock().chan.upgrade() {
-            None => {
-                println!("ctrlChann is null")
-            }
-            _ => {
-                println!("ctrlChann is not null")
-            }
-        }
-        //*rdmaConn.ctrlChan.lock() = RDMAControlChannel::New((*rdmaControlChannel.clone()).clone());
-        *rdmaConn.ctrlChan.lock() = rdmaControlChannel.clone();
-        match rdmaConn.ctrlChan.lock().chan.upgrade() {
-            None => {
-                println!("ctrlChann is null")
-            }
-            _ => {
-                println!("ctrlChann is not null")
-            }
-        }
-        for qp in rdmaConn.GetQueuePairs() {
-            RDMA_SRV
-                .controlChannels
-                .lock()
-                .insert(qp.qpNum(), rdmaControlChannel.clone());
-            RDMA_SRV
-                .controlChannels2
-                .lock()
-                .insert(qp.qpNum(), rdmaChannel.clone());
-        }
-
-        println!("before insert");
-        RDMA_SRV.conns.lock().insert(node.ipAddr, rdmaConn.clone());
-        println!("after insert");
-        unsafe {
-            let serv_addr: libc::sockaddr_in = libc::sockaddr_in {
-                sin_family: libc::AF_INET as u16,
-                sin_port: 8888u16.to_be(), //8888 is the port for RDMASvc to shake hands
-                sin_addr: libc::in_addr {
-                    s_addr: node.ipAddr,
-                },
-                sin_zero: mem::zeroed(),
-            };
-            let ret = libc::connect(
-                sock_fd,
-                &serv_addr as *const libc::sockaddr_in as *const libc::sockaddr,
-                mem::size_of_val(&serv_addr) as u32,
-            );
-
-            println!("ret is {}, error: {}", ret, Error::last_os_error());
-        }
     }
 
     let mut eventdata: u64 = 0;
@@ -732,6 +644,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     epoll_add(epoll_fd, srvEventFd, read_event(srvEventFd as u64))?;
     unblock_fd(srvEventFd);
     RDMA_CTLINFO.fds_insert(srvEventFd, Srv_FdType::SrvEventFd(srvEventFd));
+    let hostname = RDMA_CTLINFO.hostname_get();
 
     loop {
         events.clear();
@@ -909,6 +822,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // println!("eventdata: {}", eventdata);
                     RDMA_SRV.HandleClientRequest();
                 }
+                Srv_FdType::NodeEventFd(nodeEvent) => {
+                    let node = RDMA_CTLINFO.node_get(nodeEvent.ip);
+                    if node.hostname == hostname {
+                        RDMA_CTLINFO.timestamp_set(node.timestamp);
+                    }
+                    SetupConnections();
+                },
             }
 
             //println!("Finish processing fd: {}, event: {}", ev.U64, ev.Events);
@@ -945,4 +865,102 @@ fn InitContainer(conn_sock: &UnixSocket) {
             ],
         )
         .unwrap();
+}
+
+fn SetupConnections() {
+    let timestamp = RDMA_CTLINFO.timestamp_get();
+    if timestamp == 0 {
+        return
+    }
+
+    let node_ips_set = RDMA_CTLINFO.get_node_ips_for_connecting();
+    for ip in node_ips_set.iter() {
+        if !RDMA_SRV.ExistsConnection(ip) {
+            SetupConnection(ip);
+        }
+    }
+}
+
+fn SetupConnection(ip: &u32) {
+    let node = RDMA_CTLINFO.node_get(*ip);
+    let sock_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    println!("sock_fd is {}", sock_fd);
+    unblock_fd(sock_fd);
+    RDMA_CTLINFO.fds_insert(sock_fd, Srv_FdType::TCPSocketConnect(node.ipAddr));
+
+    println!("new conn");
+    let controlRegionId = RDMA_SRV.controlBufIdMgr.lock().AllocId().unwrap() as usize; // TODO: should handle no space issue.
+    let sockBuf = Arc::new(SocketBuff::InitWithShareMemory(
+        MemoryDef::DEFAULT_BUF_PAGE_COUNT,
+        &RDMA_SRV.controlRegion.ioMetas[controlRegionId].readBufAtoms as *const _ as u64,
+        &RDMA_SRV.controlRegion.ioMetas[controlRegionId].writeBufAtoms as *const _ as u64,
+        &RDMA_SRV.controlRegion.ioMetas[controlRegionId].consumeReadData as *const _ as u64,
+        &RDMA_SRV.controlRegion.iobufs[controlRegionId].read as *const _ as u64,
+        &RDMA_SRV.controlRegion.iobufs[controlRegionId].write as *const _ as u64,
+    ));
+
+    let rdmaConn = RDMAConn::New(
+        sock_fd,
+        sockBuf.clone(),
+        RDMA_SRV.keys[controlRegionId / 16][1],
+    );
+    let rdmaChannel = RDMAChannel::New(
+        0,
+        RDMA_SRV.keys[controlRegionId / 16][0],
+        RDMA_SRV.keys[controlRegionId / 16][1],
+        sockBuf.clone(),
+        rdmaConn.clone(),
+    );
+
+    let rdmaControlChannel = RDMAControlChannel::New((*rdmaChannel.clone()).clone());
+
+    match rdmaConn.ctrlChan.lock().chan.upgrade() {
+        None => {
+            println!("ctrlChann is null")
+        }
+        _ => {
+            println!("ctrlChann is not null")
+        }
+    }
+    //*rdmaConn.ctrlChan.lock() = RDMAControlChannel::New((*rdmaControlChannel.clone()).clone());
+    *rdmaConn.ctrlChan.lock() = rdmaControlChannel.clone();
+    match rdmaConn.ctrlChan.lock().chan.upgrade() {
+        None => {
+            println!("ctrlChann is null")
+        }
+        _ => {
+            println!("ctrlChann is not null")
+        }
+    }
+    for qp in rdmaConn.GetQueuePairs() {
+        RDMA_SRV
+            .controlChannels
+            .lock()
+            .insert(qp.qpNum(), rdmaControlChannel.clone());
+        RDMA_SRV
+            .controlChannels2
+            .lock()
+            .insert(qp.qpNum(), rdmaChannel.clone());
+    }
+
+    println!("before insert");
+    RDMA_SRV.conns.lock().insert(node.ipAddr, rdmaConn.clone());
+    println!("after insert");
+    unsafe {
+        let serv_addr: libc::sockaddr_in = libc::sockaddr_in {
+            sin_family: libc::AF_INET as u16,
+            sin_port: 8888u16.to_be(), //8888 is the port for RDMASvc to shake hands
+            sin_addr: libc::in_addr {
+                s_addr: node.ipAddr,
+            },
+            sin_zero: mem::zeroed(),
+        };
+        let ret = libc::connect(
+            sock_fd,
+            &serv_addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            mem::size_of_val(&serv_addr) as u32,
+        );
+
+        println!("ret is {}, error: {}", ret, Error::last_os_error());
+    }
 }

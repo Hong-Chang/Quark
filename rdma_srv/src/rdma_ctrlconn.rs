@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use spin::Mutex;
+use std::cell::RefCell;
 use std::iter::FromIterator;
 use std::net::{IpAddr, Ipv4Addr};
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, collections::HashSet, str::FromStr};
 use super::common::*;
+use std::os::unix::io::{AsRawFd, RawFd};
 
 use super::qlib::rdma_share::*;
 
@@ -48,12 +50,14 @@ pub struct CtrlInfo {
     pub hostname: Mutex<String>,
 
     // Timestamp of the node
-    pub timestamp: Mutex<u32>,
+    pub timestamp: Mutex<u64>,
+
+    pub epoll_fd: Mutex<RawFd>,
 }
 
 impl Default for CtrlInfo {
     fn default() -> CtrlInfo {
-        let mut nodes: HashMap<u32, Node> = HashMap::new();
+        let nodes: HashMap<u32, Node> = HashMap::new();
         // let subnet = u32::from(Ipv4Addr::from_str("172.16.1.0").unwrap());
         // let netmask = u32::from(Ipv4Addr::from_str("255.255.255.0").unwrap());
         // let lab1ip = u32::from(Ipv4Addr::from_str("172.16.1.8").unwrap());
@@ -96,6 +100,7 @@ impl Default for CtrlInfo {
             fds: Mutex::new(HashMap::new()),
             hostname: Mutex::new(String::new()),
             timestamp: Mutex::new(0),
+            epoll_fd: Mutex::new(0),
         }
     }
 }
@@ -119,6 +124,48 @@ impl CtrlInfo{
     pub fn hostname_get(&self) -> String {
         self.hostname.lock().clone()
     }
+
+    pub fn timestamp_set(&self, value: u64) {
+        let mut timestamp = self.timestamp.lock();
+        *timestamp = value;
+    }
+
+    pub fn timestamp_get(&self) -> u64 {
+        self.timestamp.lock().clone()
+    }
+
+    pub fn get_node_ips_for_connecting(&self) -> HashSet<u32> {
+        let mut set: HashSet<u32> = HashSet::new();
+        let timestamp = self.timestamp_get();
+        for (_, node) in self.nodes.lock().iter() {
+            if node.timestamp < timestamp {
+                set.insert(node.ipAddr);
+            }
+        }
+        set
+    }
+
+    pub fn get_node_ip_by_pod_ip(&self, ip: &u32) -> Option<u32> {
+        for (_, node) in self.nodes.lock().iter() {
+            if node.netmask & *ip == node.subnet {
+                return Some(node.ipAddr);
+            }            
+        }
+        None
+    }
+
+    pub fn epoll_fd_set(&self, value: RawFd) {
+        let mut epoll_fd = self.epoll_fd.lock();
+        *epoll_fd = value;
+    }
+
+    pub fn epoll_fd_get(&self) -> RawFd {
+        self.epoll_fd.lock().clone()
+    }
+
+    pub fn node_get(&self, ip: u32) -> Node {
+        self.nodes.lock().get(&ip).unwrap().clone()
+    }
 }
 
 pub struct ClusterSubnetInfo {
@@ -137,7 +184,7 @@ pub struct ClusterSubnetInfo {
 // from current design, one node has only one subnet even it can have multiple VPC
 // for one node, different VPC has to use one subnet,
 // todo: support different subnet for different VPC
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Node {
     pub ipAddr: u32,
     pub timestamp: u64,
