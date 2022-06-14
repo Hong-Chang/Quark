@@ -451,9 +451,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RDMA Service is starting!");
     RDMA.Init("", 1);
 
-    let mut node_informer = NodeInformer::new().await?;
-    node_informer.run();
-
     // let test = RDMA_SRV1.eventfd;
     // println!("test: {}", test);
     // let test1 = RDMA_SRV.eventfd;
@@ -529,6 +526,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     unblock_fd(server_fd);
     RDMA_CTLINFO.fds_insert(server_fd, Srv_FdType::TCPSocketServer);
     epoll_add(epoll_fd, server_fd, read_write_event(server_fd as u64))?;
+
+    tokio::spawn(async {
+        let mut node_informer = NodeInformer::new();
+        match node_informer.run().await {
+            Err(e) => println!("Error to handle nodes: {:?}", e),
+            Ok(_) => (),
+        };
+    });
+    
 
     //watch RDMA event
     let ccFd = RDMA.CompleteChannelFd();

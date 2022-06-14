@@ -32,25 +32,24 @@ pub struct NodeInformer {
 }
 
 impl NodeInformer {
-    pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut informer = Self {
+    pub fn new() -> NodeInformer {
+        NodeInformer{
             max_resource_version: 0,
-        };
-        let mut client = QuarkCmServiceClient::connect(GRPC_SERVER_ADDRESS).await?;
-
-        let ref nodes_message = client.list_node(()).await?.into_inner().nodes;
-        if nodes_message.len() > 0 {
-            for node_message in nodes_message {
-                informer.handle(node_message);
-            }
         }
-
-        Ok(informer)
     }
 }
 
 impl NodeInformer {
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut client = QuarkCmServiceClient::connect(GRPC_SERVER_ADDRESS).await?;
+
+        let ref nodes_message = client.list_node(()).await?.into_inner().nodes;
+        if nodes_message.len() > 0 {
+            for node_message in nodes_message {
+                self.handle(node_message);
+            }
+        }
+
         loop {
             match self.run_watch().await {
                 Ok(_) => {}
