@@ -830,7 +830,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Srv_FdType::NodeEventFd(nodeEvent) => {
                     let node = RDMA_CTLINFO.node_get(nodeEvent.ip);
-                    if node.hostname == hostname {
+                    if node.hostname.eq_ignore_ascii_case(&hostname) {
                         RDMA_CTLINFO.timestamp_set(node.timestamp);
                     }
                     SetupConnections();
