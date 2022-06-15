@@ -517,6 +517,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hostname is {}", RDMA_CTLINFO.hostname_get());
 
     let epoll_fd = epoll_create().expect("can create epoll queue");
+    println!("epoll_fd is {}", epoll_fd);
     RDMA_CTLINFO.epoll_fd_set(epoll_fd);
     let mut events: Vec<EpollEvent> = Vec::with_capacity(1024);
 
@@ -754,6 +755,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Srv_FdType::TCPSocketConnect(ipAddr) => match RDMA_SRV.conns.lock().get(&ipAddr) {
                     Some(rdmaConn) => {
+                        println!("TCP socket is connecting {}", ipAddr);
                         rdmaConn.Notify(ev.Events as u64);
                     }
                     _ => {
@@ -890,9 +892,18 @@ fn SetupConnections() {
 fn SetupConnection(ip: &u32) {
     let node = RDMA_CTLINFO.node_get(*ip);
     let sock_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    println!("sock_fd is {}", sock_fd);
     unblock_fd(sock_fd);
     RDMA_CTLINFO.fds_insert(sock_fd, Srv_FdType::TCPSocketConnect(node.ipAddr));
+    let epoll_fd = RDMA_CTLINFO.epoll_fd_get();
+    println!("epoll_fd: {}, sock_fd: {}", epoll_fd, sock_fd);
+    match epoll_add(epoll_fd, sock_fd, read_write_event(sock_fd as u64)) {
+        Err(e) => {
+            println!("epoll_add failed: {:?}", e);
+        }
+        _ => {
+            println!("epoll_add succeed");
+        }
+    }
 
     println!("new conn");
     let controlRegionId = RDMA_SRV.controlBufIdMgr.lock().AllocId().unwrap() as usize; // TODO: should handle no space issue.

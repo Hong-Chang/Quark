@@ -102,6 +102,7 @@ impl NodeInformer {
                 is_delete: false,
                 ip: ip,
             }));
+            unblock_fd(fd);
             match epoll_add(epoll_fd, fd, read_write_event(fd as u64)) {
                 Ok(_) => {}
                 Err(e) => {
@@ -116,6 +117,7 @@ impl NodeInformer {
                         is_delete: true,
                         ip: ip,
                     }));
+                    unblock_fd(fd);
                     match epoll_add(epoll_fd, fd, read_write_event(fd as u64)) {
                         Ok(_) => {}
                         Err(e) => {
